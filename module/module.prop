@@ -1,0 +1,6 @@
+id=rucoy_tile_bot
+name=Rucoy Tile Bot (Zygisk)
+version=1.0.2
+versionCode=102
+author=OpenAI-assisted build
+description=Phone-only Rucoy monster tile watcher. Watches world tile 187,445 and performs a root input tap at 886,361 through a Zygisk companion.
