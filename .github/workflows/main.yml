@@ -1,0 +1,78 @@
+name: Build Rucoy Tile Bot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "native/**"
+      - "module/**"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: true
+
+      - name: Fetch published Zygisk API header
+        run: |
+          set -euxo pipefail
+          mkdir -p native/include
+          curl -L --fail --retry 3 \
+            https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp \
+            -o native/include/zygisk.hpp
+
+      - name: Fetch pinned Dobby
+        run: |
+          set -euxo pipefail
+          rm -rf third_party/Dobby
+          git clone https://github.com/jmpews/Dobby.git third_party/Dobby
+          git -C third_party/Dobby checkout 809f8ca
+          echo "Dobby commit: $(git -C third_party/Dobby rev-parse HEAD)"
+
+      - name: Configure
+        run: |
+          set -euxo pipefail
+          cmake -S native -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: |
+          set -euxo pipefail
+          cmake --build build --parallel
+          file build/librucoy_tile_bot.so
+
+      - name: Package module ZIP
+        run: |
+          set -euxo pipefail
+          rm -rf out
+          mkdir -p out/module/zygisk
+          cp -a module/. out/module/
+          rm -f out/module/zygisk/.gitkeep
+          cp build/librucoy_tile_bot.so out/module/zygisk/arm64-v8a.so
+          chmod 0644 out/module/zygisk/arm64-v8a.so
+          chmod 0755 out/module/customize.sh out/module/action.sh
+          cd out/module
+          zip -9 -r ../Rucoy-TileBot-Zygisk.zip .
+          cd ../..
+          unzip -l out/Rucoy-TileBot-Zygisk.zip
+
+      - name: Upload module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rucoy-TileBot-Zygisk
+          path: out/Rucoy-TileBot-Zygisk.zip
+          if-no-files-found: error
