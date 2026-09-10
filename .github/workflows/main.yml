@@ -1,0 +1,162 @@
+name: Build Rucoy Tile Bot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "native/**"
+      - "module/**"
+      - "build-local.sh"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK r26d
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: false
+
+      - name: Fetch published Zygisk API header
+        run: |
+          set -euxo pipefail
+          mkdir -p native/include
+          curl -L --fail --retry 3 --retry-delay 2 \
+            https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp \
+            -o native/include/zygisk.hpp
+          test -s native/include/zygisk.hpp
+
+      - name: Fetch prebuilt Dobby for Android arm64-v8a
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euxo pipefail
+
+          DOBBY_VERSION="1.2"
+          AAR_URL="https://repo.maven.apache.org/maven2/io/github/vvb2060/ndk/dobby/${DOBBY_VERSION}/dobby-${DOBBY_VERSION}.aar"
+
+          rm -rf third_party/dobby-prebuilt third_party/dobby-aar
+          mkdir -p third_party/dobby-prebuilt/include third_party/dobby-prebuilt/lib third_party/dobby-aar
+
+          curl -L --fail --retry 3 --retry-delay 2 \
+            "$AAR_URL" \
+            -o third_party/dobby.aar
+
+          unzip -q third_party/dobby.aar -d third_party/dobby-aar
+
+          DOBBY_LIB="$(find third_party/dobby-aar -type f -name 'libdobby.a' | grep -E '/(android\.)?arm64-v8a/' | head -n 1 || true)"
+          DOBBY_HEADER="$(find third_party/dobby-aar -type f -name 'dobby.h' | head -n 1 || true)"
+
+          if [ -z "$DOBBY_LIB" ]; then
+            echo "::error::arm64-v8a libdobby.a not found in Dobby AAR"
+            find third_party/dobby-aar -maxdepth 8 -type f -print
+            exit 1
+          fi
+
+          if [ -z "$DOBBY_HEADER" ]; then
+            echo "::error::dobby.h not found in Dobby AAR"
+            find third_party/dobby-aar -maxdepth 8 -type f -print
+            exit 1
+          fi
+
+          cp "$DOBBY_LIB" third_party/dobby-prebuilt/lib/libdobby.a
+          cp "$DOBBY_HEADER" third_party/dobby-prebuilt/include/dobby.h
+
+          NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          AR="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+
+          # Do not pipe llvm-nm into `grep -q` while pipefail is enabled.
+          # grep exits as soon as it sees a match, which can SIGPIPE llvm-nm and
+          # make an otherwise successful symbol check fail with exit code 74.
+          SYMBOLS_FILE="$(mktemp)"
+          "$NM" -g third_party/dobby-prebuilt/lib/libdobby.a > "$SYMBOLS_FILE"
+          if ! grep -F 'DobbyInstrument' "$SYMBOLS_FILE" >/dev/null; then
+            echo "::error::DobbyInstrument symbol not found in prebuilt libdobby.a"
+            tail -n 80 "$SYMBOLS_FILE" || true
+            rm -f "$SYMBOLS_FILE"
+            exit 1
+          fi
+          rm -f "$SYMBOLS_FILE"
+
+          # Same rule here: materialize the archive table first instead of
+          # using `ar | grep | head` under pipefail.
+          ARCHIVE_LIST="$(mktemp)"
+          "$AR" t third_party/dobby-prebuilt/lib/libdobby.a > "$ARCHIVE_LIST"
+          FIRST_OBJ="$(grep -E '\.o$' "$ARCHIVE_LIST" | sed -n '1p')"
+          rm -f "$ARCHIVE_LIST"
+
+          if [ -z "$FIRST_OBJ" ]; then
+            echo "::error::No object files found inside libdobby.a"
+            exit 1
+          fi
+
+          TMPDIR="$(mktemp -d)"
+          (
+            cd "$TMPDIR"
+            "$AR" x "$GITHUB_WORKSPACE/third_party/dobby-prebuilt/lib/libdobby.a" "$FIRST_OBJ"
+            "$READELF" -h "$FIRST_OBJ" > elf-header.txt
+            grep -E 'Machine:.*AArch64' elf-header.txt
+          )
+          rm -rf "$TMPDIR"
+
+          echo "Dobby library: $DOBBY_LIB"
+          echo "Dobby header : $DOBBY_HEADER"
+          echo "Dobby validation: OK (DobbyInstrument + AArch64)"
+
+      - name: Configure
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euxo pipefail
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          "$ANDROID_NDK_HOME/ndk-build" --version || true
+
+          cmake -S native -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -euxo pipefail
+          cmake --build build --parallel
+          file build/librucoy_tile_bot.so
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -h build/librucoy_tile_bot.so | grep -E 'Machine:.*AArch64'
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d build/librucoy_tile_bot.so | grep NEEDED || true
+
+      - name: Package module ZIP
+        run: |
+          set -euxo pipefail
+          rm -rf out
+          mkdir -p out/module/zygisk
+          cp -a module/. out/module/
+          rm -f out/module/zygisk/.gitkeep
+          cp build/librucoy_tile_bot.so out/module/zygisk/arm64-v8a.so
+          chmod 0644 out/module/zygisk/arm64-v8a.so
+          chmod 0755 out/module/customize.sh out/module/action.sh
+
+          cd out/module
+          zip -9 -r ../Rucoy-TileBot-Zygisk.zip .
+          cd ../..
+
+          unzip -l out/Rucoy-TileBot-Zygisk.zip
+
+      - name: Upload module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rucoy-TileBot-Zygisk
+          path: out/Rucoy-TileBot-Zygisk.zip
+          if-no-files-found: error
