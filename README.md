@@ -1,52 +1,49 @@
 # Rucoy Tile Bot - Zygisk
 
-Phone-only Zygisk module for the currently verified Rucoy Online build.
+Phone-only native Zygisk module for the currently tested Rucoy build.
 
 ## Current configuration
 
 - Package: `com.mmo.android`
-- Native library: `libgojni.so`
-- Instrumentation RVA: `0x6daabc`
-- Target world position: `(187, 445)`
-- Tolerance: `0.18`
+- Library: `libgojni.so`
+- Hook RVA: `0x6daabc`
+- World target: `(187, 445)`
+- Epsilon: `0.18`
 - Android tap: `(886, 361)` on display `0`
 - ABI: `arm64-v8a`
 
-The native callback reads ARM64 `S0/S1` from Dobby's register context. It keeps an ENTER/EXIT state per observed monster pointer. On ENTER, it signals a root Zygisk companion over a socket. The companion executes `/system/bin/input -d 0 tap 886 361`.
+Configuration lives in `native/src/config.hpp`.
 
 ## Build with GitHub Actions
 
-1. Extract this source ZIP.
-2. Create a new GitHub repository and upload all extracted files, including `.github/workflows/build.yml`.
-3. Open **Actions** -> **Build Rucoy Tile Bot** -> **Run workflow**.
-4. Download the `Rucoy-TileBot-Zygisk` artifact.
-5. Inside the artifact is `Rucoy-TileBot-Zygisk.zip`, installable as a root module.
-6. Reboot the phone.
+1. Upload the contents of this folder to a GitHub repository. Keep `.github/workflows/build.yml`.
+2. Open **Actions** and run **Build Rucoy Tile Bot**.
+3. Download the artifact named `Rucoy-TileBot-Zygisk`.
+4. Inside the artifact is `Rucoy-TileBot-Zygisk.zip`, ready for a compatible Zygisk-capable root manager.
+5. Install, reboot, then launch Rucoy.
 
-The workflow fetches the published Zygisk API header and checks out Dobby at commit `809f8ca`, then builds only `arm64-v8a` with Android NDK r26d.
+The workflow explicitly uses NDK r26d through `setup-ndk`'s `ndk-path` output. It does not compile the currently broken upstream Dobby source tree. Instead it consumes the immutable Android Dobby 1.2 static Prefab artifact from Maven Central and verifies that the archive is AArch64 and exports `DobbyInstrument` before building this module.
 
 ## Logs
 
+After reboot and launching the game:
+
 ```sh
-su -c 'logcat -s RucoyTileBot:I *:S'
+su -c 'logcat -s RucoyTileBot:I "*:S"'
 ```
 
 Expected messages include:
 
 ```text
-RucoyTileBot: target process selected; companion fd=...
+RucoyTileBot: target process selected
 RucoyTileBot: libgojni.so base=... hook=...
 RucoyTileBot: hook active target=(187.000,445.000) eps=0.180 tap=(886,361)
-RucoyTileBot: ENTER ptr=... world=(187.000,445.000)
+RucoyTileBot: ENTER ptr=... world=(187.xxx,445.xxx)
 RucoyTileBot: root tap display=0 x=886 y=361
 ```
 
-## Change coordinates / RVA
-
-Edit `native/src/config.hpp` and run the workflow again.
-
 ## Important
 
-The RVA is build-specific. If Rucoy updates, `0x6daabc` may no longer be correct and the module should be disabled until the new hook location is verified.
+The RVA is build-specific. If Rucoy updates and `libgojni.so` changes, `0x6daabc` may need to be rediscovered before installing a rebuilt module.
 
-This project does not patch or disable app protection libraries. If the game rejects native instrumentation on a particular build/device, the module intentionally contains no protection-bypass logic.
+This project does not patch or disable the game's protection library. It only loads in the target process, observes the known native position point, and requests a root input tap through the Zygisk companion.
